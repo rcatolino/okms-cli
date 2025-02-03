@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/base64"
 	"io"
+	"strconv"
+	"sync"
 
 	"github.com/google/uuid"
 	"github.com/ovh/okms-cli/cmd/okms/common"
@@ -19,6 +21,7 @@ func newDecryptWithServiceKeyCmd() *cobra.Command {
 		useWrap    bool
 		noProgress bool
 		fromBase64 bool
+		repeat     uint32
 		context    string
 	)
 
@@ -49,20 +52,37 @@ OUTPUT can be either a filepath, or a "-" for stdout. If not set, output is stdo
 			}
 
 			text := flagsmgmt.BytesFromArg(args[1], 8192)
-			resp := exit.OnErr2(common.Client().Decrypt(cmd.Context(), keyId, context, string(text)))
-			if cmd.Flag("output").Value.String() == string(flagsmgmt.JSON_OUTPUT_FORMAT) {
-				output.JsonPrint(resp)
-			} else {
-				writer := flagsmgmt.WriterFromArg(out)
-				defer writer.Close()
-				exit.OnErr2(writer.Write(resp))
+			c := common.Client()
+			writer := flagsmgmt.WriterFromArg(out)
+			var wg sync.WaitGroup
+			defer writer.Close()
+			for gn := range 16 {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					for i := range repeat / 16 {
+						resp := exit.OnErr2(c.Decrypt(cmd.Context(), keyId, context, string(text)))
+						if cmd.Flag("output").Value.String() == string(flagsmgmt.JSON_OUTPUT_FORMAT) {
+							output.JsonPrint(resp)
+						} else {
+							exit.OnErr2(writer.Write([]byte(strconv.Itoa(int(gn)))))
+							exit.OnErr2(writer.Write([]byte("-")))
+							exit.OnErr2(writer.Write([]byte(strconv.Itoa(int(i)))))
+							exit.OnErr2(writer.Write(resp))
+							exit.OnErr2(writer.Write([]byte("\n")))
+						}
+					}
+				}()
 			}
+
+			wg.Wait()
 		},
 	}
 
 	cmd.Flags().BoolVar(&useWrap, "dk", false, "Decrypt locally using an embedded encrypted datakey")
 	cmd.Flags().BoolVar(&noProgress, "no-progress", false, "Do not display progress bar or spinner")
 	cmd.Flags().BoolVar(&fromBase64, "base64", false, "When using a datakey, decrypts a base64 encoded input")
+	cmd.Flags().Uint32Var(&repeat, "repeat", 1, "Repeat that operation n times")
 	cmd.Flags().StringVar(&context, "context", "", "Optional encryption context (AAD)")
 	return cmd
 }
